@@ -1,5 +1,5 @@
 # VoxWatch v2.0 — Smart Voice Alarm
-# Banaya: Aditya Thakare
+#  Aditya Thakare
 
 import threading
 import time
@@ -20,7 +20,7 @@ import pyttsx3
 
 
 # ── VOICE ENGINE ──────────────────────
-# Yeh class app ko bolne ki taakat deti hai!
+
 
 class VoiceEngine:
     def __init__(self):
@@ -33,7 +33,7 @@ class VoiceEngine:
             self.engine = None
 
     def speak(self, text):
-        # Yeh function text ko awaaz mein badalta hai
+       
         if self.engine:
             def _run():
                 try:
@@ -45,17 +45,11 @@ class VoiceEngine:
         else:
             print(f"[SPEAK] {text}")
 
-# Global voice object banao
+
 voice = VoiceEngine()
 
 
 # ── ALARM ENGINE ──────────────────────
-# Yeh class alarm ko manage karti hai!
-
-# 
-
-
-
 
 class AlarmEngine:
     def __init__(self, on_trigger):
@@ -112,21 +106,19 @@ class AlarmEngine:
             print(f"❌ CSV Error: {e}")
 
             # ── MAIN APP ──────────────────────────
-# Yeh class poori app banati hai!
 
-class VoxWatchApp(App):
-    def build(self):
-        # Window setup
+
+      
         Window.clearcolor = (0.04, 0.06, 0.10, 1)  # Dark background
         self.title = "VoxWatch v2.0"
 
-        # Alarm engine shuru karo
+       
         self.alarm_engine = AlarmEngine(
             on_trigger=self._on_alarm
         )
         self.alarm_engine.start()
 
-        # CSV load karo
+  
         csv_path = os.path.join(
             os.path.dirname(__file__),
             "sample_routine.csv"
@@ -134,10 +126,10 @@ class VoxWatchApp(App):
         if os.path.exists(csv_path):
             self.alarm_engine.load_csv(csv_path)
 
-        # Main layout banao
+       
         root = BoxLayout(orientation='vertical')
 
-        # ── HEADER ──
+  
         header = Label(
             text="⌚ VoxWatch v2.0",
             font_size=24,
@@ -243,10 +235,9 @@ class VoxWatchApp(App):
         scroll.add_widget(self.alarm_list)
         root.add_widget(scroll)
 
-        # Alarm list refresh karo
         self._refresh_alarms()
 
-        # Welcome message bolao
+      
         Clock.schedule_once(
             lambda dt: voice.speak("VoxWatch ready hai!"), 1
         )
@@ -254,7 +245,7 @@ class VoxWatchApp(App):
         return root
 
     def _update_clock(self, dt):
-        # Clock update karo har second
+    
         now = datetime.now()
         self.clock_label.text = now.strftime("%H:%M")
         self.date_label.text = now.strftime("%A, %d %B %Y")
@@ -270,11 +261,9 @@ class VoxWatchApp(App):
             voice.speak("Time format galat hai! HH MM format use karo")
             return
 
-        # Alarm add karo
         self.alarm_engine.add(t, l, r)
         voice.speak(f"Alarm set ho gaya {l} ke liye {t} baje")
 
-        # Fields clear karo
         self.time_input.text = ""
         self.label_input.text = ""
         self.routine_input.text = ""
@@ -283,7 +272,7 @@ class VoxWatchApp(App):
         self._refresh_alarms()
 
     def _refresh_alarms(self):
-        # Alarm list clear karke dobara banao
+
         self.alarm_list.clear_widgets()
 
         if not self.alarm_engine.alarms:
@@ -297,14 +286,14 @@ class VoxWatchApp(App):
             return
 
         for alarm in self.alarm_engine.alarms:
-            # Har alarm ka row banao
+           
             row = BoxLayout(
                 size_hint_y=None,
                 height=60,
                 spacing=8
             )
 
-            # Time + Label
+         
             info = Label(
                 text=f"⏰ {alarm['time']}  {alarm['label']}",
                 font_size=16,
@@ -316,7 +305,7 @@ class VoxWatchApp(App):
             self.alarm_list.add_widget(row)
 
     def _on_alarm(self, alarm):
-        # Alarm bajne par yeh chalta hai!
+
         routine_items = alarm['routine'].split('|')
         spoken = f"It's {alarm['time']} — {alarm['label']}. "
         spoken += "Teri routine hai: "
