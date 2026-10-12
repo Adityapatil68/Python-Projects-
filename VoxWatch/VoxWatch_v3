@@ -1,0 +1,994 @@
+# VoxWatch v3.0 — AI-Powered Smart Alarm
+# Claude API + WearOS + Health Tracking
+# Banaya: Aditya Thakare (Adiyani)
+
+import threading
+import time
+import csv
+import os
+import math
+import json
+import urllib.request
+import urllib.error
+from datetime import datetime
+
+from kivy.app import App
+from kivy.uix.screenmanager import ScreenManager, Screen, SlideTransition
+from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.floatlayout import FloatLayout
+from kivy.uix.scrollview import ScrollView
+from kivy.uix.label import Label
+from kivy.uix.button import Button
+from kivy.uix.switch import Switch
+from kivy.uix.slider import Slider
+from kivy.uix.progressbar import ProgressBar
+from kivy.uix.widget import Widget
+from kivy.graphics import (Color, Ellipse, Rectangle,
+                            RoundedRectangle, Line)
+from kivy.clock import Clock
+from kivy.metrics import dp, sp
+from kivy.core.window import Window
+from kivy.utils import get_color_from_hex as hex_c
+import pyttsx3
+
+Window.size = (390, 780)
+
+# ── COLORS: VoxWatch v3 — Deep Space AI Theme
+BG1    = hex_c('#080B14')   # Deep space black
+BG2    = hex_c('#0F1623')   # Card dark
+BG3    = hex_c('#1A2235')   # Separator
+PURPLE = hex_c('#7B2FBE')   # AI purple
+CYAN   = hex_c('#00D4FF')   # AI cyan
+GOLD   = hex_c('#F5A623')   # Gold accent
+GREEN  = hex_c('#06D6A0')   # Mint green
+CORAL  = hex_c('#FF6B6B')   # Coral red
+WHITE  = hex_c('#FFFFFF')
+GREY   = hex_c('#8892A4')
+SILVER = hex_c('#C8D6E5')
+
+# Claude API
+CLAUDE_API_URL = "https://api.anthropic.com/v1/messages"
+CLAUDE_API_KEY = os.getenv('CLAUDE_API_KEY', 'YOUR_API_KEY_HERE')
+CLAUDE_MODEL   = "claude-sonnet-4-6"
+
+
+def with_alpha(col, a):
+    """Return an RGBA tuple from a color list/tuple and alpha value.
+
+    Example: with_alpha(PURPLE, 0.15) -> (r,g,b,0.15)
+    """
+    try:
+        return (col[0], col[1], col[2], float(a))
+    except Exception:
+        return (0, 0, 0, float(a))
+
+# ── TTS
+try:
+    _tts = pyttsx3.init()
+    _tts.setProperty('rate', 148)
+    TTS_OK = True
+except Exception as e:
+    print(f"TTS: {e}")
+    TTS_OK = False
+
+def speak(text):
+    if TTS_OK:
+        def _r():
+            try:
+                _tts.say(text)
+                _tts.runAndWait()
+            except Exception as e:
+                print(f"Speak: {e}")
+        threading.Thread(target=_r, daemon=True).start()
+
+# ── DATA
+alarms       = []
+health_data  = {'steps': 4280, 'heart_rate': 72, 'sleep': 7.2, 'calories': 1840}
+ai_routine   = []
+
+def add_alarm(t, label, days, routine):
+    alarms.append({
+        'time': t, 'label': label, 'days': days,
+        'routine': routine, 'active': True, 'triggered': False
+    })
+
+def load_csv():
+    path = os.path.join(os.path.dirname(__file__), 'sample_routine.csv')
+    if not os.path.exists(path):
+        return
+    try:
+        with open(path, newline='', encoding='utf-8') as f:
+            for row in csv.DictReader(f):
+                add_alarm(
+                    row.get('time','07:00').strip(),
+                    row.get('label','Alarm').strip(),
+                    ['Mon','Wed','Thu'],
+                    row.get('routine','').strip()
+                )
+    except Exception as e:
+        print(f"CSV: {e}")
+
+# ── HELPERS
+def flat_bg(w, col=None):
+    c = col or BG1
+    with w.canvas.before:
+        Color(*c)
+        r = Rectangle(pos=w.pos, size=w.size)
+    w.bind(pos=lambda ww,v: setattr(r,'pos',v),
+           size=lambda ww,v: setattr(r,'size',v))
+    return r
+
+def round_card(w, col=None, rad=16):
+    c = col or BG2
+    with w.canvas.before:
+        Color(*c)
+        r = RoundedRectangle(pos=w.pos, size=w.size,
+                              radius=[dp(rad)])
+    w.bind(pos=lambda ww,v: setattr(r,'pos',v),
+           size=lambda ww,v: setattr(r,'size',v))
+    return r
+
+def sep_line(box):
+    s = Widget(size_hint_y=None, height=dp(1))
+    with s.canvas:
+        Color(*BG3)
+        sr = Rectangle(pos=s.pos, size=s.size)
+    s.bind(pos=lambda w,v: setattr(sr,'pos',v),
+           size=lambda w,v: setattr(sr,'size',v))
+    box.add_widget(s)
+
+# ══════════════════════════════════════════
+# CLAUDE AI ENGINE
+# ══════════════════════════════════════════
+def claude_ai_routine(health, callback):
+    """Ask Claude to generate smart routine based on health data"""
+    def _call():
+        prompt = f"""You are VoxWatch AI assistant.
+Based on this health data:
+- Steps today: {health['steps']}
+- Heart rate: {health['heart_rate']} bpm
+- Sleep last night: {health['sleep']} hours
+- Calories burned: {health['calories']}
+
+Generate a smart daily routine with 6 time slots.
+Reply ONLY in this JSON format (no markdown):
+{{"routine": [
+  {{"time": "06:30", "task": "Morning exercise", "reason": "short reason"}},
+  {{"time": "08:00", "task": "Breakfast", "reason": "short reason"}},
+  {{"time": "09:00", "task": "DSA Practice", "reason": "short reason"}},
+  {{"time": "13:00", "task": "Lunch + rest", "reason": "short reason"}},
+  {{"time": "19:00", "task": "Java revision", "reason": "short reason"}},
+  {{"time": "22:00", "task": "GitHub commit", "reason": "short reason"}}
+]}}"""
+        try:
+            payload = json.dumps({
+                "model": CLAUDE_MODEL,
+                "max_tokens": 500,
+                "messages": [{"role": "user", "content": prompt}]
+            }).encode('utf-8')
+            req = urllib.request.Request(
+                CLAUDE_API_URL, data=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "x-api-key": CLAUDE_API_KEY,
+                    "anthropic-version": "2023-06-01"
+                }, method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode())
+                raw  = data['content'][0]['text'].strip()
+                parsed = json.loads(raw)
+                Clock.schedule_once(
+                    lambda dt: callback(parsed['routine'], None), 0)
+        except Exception as e:
+            Clock.schedule_once(
+                lambda dt: callback(None, str(e)), 0)
+    threading.Thread(target=_call, daemon=True).start()
+
+# ══════════════════════════════════════════
+# ANALOG CLOCK — AI Style
+# ══════════════════════════════════════════
+class AnalogClock(Widget):
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.size_hint = (None, None)
+        self.size = (dp(180), dp(180))
+        Clock.schedule_interval(self._draw, 1)
+        self._draw()
+
+    def _draw(self, *_):
+        self.canvas.clear()
+        cx, cy = self.center_x, self.center_y
+        r = dp(86)
+        now = datetime.now()
+        h, m, s = now.hour % 12, now.minute, now.second
+        with self.canvas:
+            # Outer glow
+            Color(*with_alpha(PURPLE, 0.15))
+            Ellipse(pos=(cx-r-dp(10), cy-r-dp(10)),
+                    size=(r*2+dp(20), r*2+dp(20)))
+            # Face
+            Color(*BG2)
+            Ellipse(pos=(cx-r, cy-r), size=(r*2, r*2))
+            # Ring
+            Color(*with_alpha(PURPLE, 0.6))
+            Line(circle=(cx, cy, r), width=dp(1.5))
+            # Dots
+            for i in range(12):
+                ang = math.radians(90 - i*30)
+                dr  = dp(2.5) if i%3==0 else dp(1.2)
+                dx  = cx + (r-dp(10))*math.cos(ang)
+                dy  = cy + (r-dp(10))*math.sin(ang)
+                Color(*CYAN if i%3==0 else GREY)
+                Ellipse(pos=(dx-dr,dy-dr), size=(dr*2,dr*2))
+            # Hour hand
+            ah = math.radians(90-(h*30+m*0.5))
+            Color(*WHITE)
+            Line(points=[cx,cy,
+                         cx+dp(48)*math.cos(ah),
+                         cy+dp(48)*math.sin(ah)],
+                 width=dp(3.5), cap='round')
+            # Minute hand
+            am = math.radians(90-m*6)
+            Color(*SILVER)
+            Line(points=[cx,cy,
+                         cx+dp(66)*math.cos(am),
+                         cy+dp(66)*math.sin(am)],
+                 width=dp(2.5), cap='round')
+            # Second hand
+            as_ = math.radians(90-s*6)
+            Color(*CYAN)
+            Line(points=[cx-dp(12)*math.cos(as_),
+                         cy-dp(12)*math.sin(as_),
+                         cx+dp(72)*math.cos(as_),
+                         cy+dp(72)*math.sin(as_)],
+                 width=dp(1.5), cap='round')
+            # Center
+            Color(*CYAN)
+            Ellipse(pos=(cx-dp(5),cy-dp(5)), size=(dp(10),dp(10)))
+
+# ══════════════════════════════════════════
+# HOME SCREEN
+# ══════════════════════════════════════════
+class HomeScreen(Screen):
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self._build()
+        Clock.schedule_interval(self._tick, 1)
+        Clock.schedule_interval(self._refresh_alarms, 3)
+
+    def _build(self):
+        root = BoxLayout(orientation='vertical', spacing=0)
+        flat_bg(root, BG1)
+
+        # ── Nav bar
+        nav = BoxLayout(size_hint_y=None, height=dp(56),
+                        padding=[dp(16),dp(10)])
+        flat_bg(nav, BG1)
+        nav.add_widget(Label(text='⌚ VoxWatch', font_size=sp(18),
+                             bold=True, color=CYAN, halign='left',
+                             size_hint_x=None, width=dp(160)))
+        nav.add_widget(Widget())
+        for icon, screen in [('🤖','ai_screen'),('⚙','settings'),('＋','add_alarm')]:
+            b = Button(text=icon, font_size=sp(20),
+                       size_hint=(None,None), size=(dp(38),dp(38)),
+                       background_color=(0,0,0,0), color=CYAN)
+            b.bind(on_press=lambda _,s=screen:
+                   setattr(self.manager,'current',s))
+            nav.add_widget(b)
+        root.add_widget(nav)
+
+        # ── Scroll content
+        sv = ScrollView()
+        content = BoxLayout(orientation='vertical',
+                            size_hint_y=None, spacing=dp(12),
+                            padding=[dp(12),dp(8)])
+        content.bind(minimum_height=content.setter('height'))
+
+        # Clock card
+        clock_card = FloatLayout(size_hint_y=None, height=dp(220))
+        round_card(clock_card, BG2, 20)
+        self.clock_w = AnalogClock(
+            pos_hint={'center_x':0.5,'center_y':0.6})
+        clock_card.add_widget(self.clock_w)
+        self.dig_lbl = Label(
+            text=datetime.now().strftime('%H:%M'),
+            font_size=sp(14), bold=True, color=GREY,
+            size_hint=(1,None), height=dp(24),
+            pos_hint={'center_x':0.5,'y':0.02})
+        clock_card.add_widget(self.dig_lbl)
+        self.date_lbl = Label(
+            text=datetime.now().strftime('%A, %d %B'),
+            font_size=sp(12), color=GREY,
+            size_hint=(1,None), height=dp(20),
+            pos_hint={'center_x':0.5,'top':0.22})
+        clock_card.add_widget(self.date_lbl)
+        content.add_widget(clock_card)
+
+        # Health mini card
+        health_card = BoxLayout(size_hint_y=None, height=dp(80),
+                                spacing=dp(1))
+        round_card(health_card, BG2, 16)
+        for icon, val, lbl in [
+            ('🚶', f"{health_data['steps']:,}", 'Steps'),
+            ('❤️', f"{health_data['heart_rate']}", 'BPM'),
+            ('😴', f"{health_data['sleep']}h", 'Sleep'),
+            ('🔥', f"{health_data['calories']}", 'kcal'),
+        ]:
+            col = BoxLayout(orientation='vertical', padding=[dp(4),dp(8)])
+            col.add_widget(Label(text=icon, font_size=sp(20),
+                                 size_hint_y=None, height=dp(28)))
+            col.add_widget(Label(text=val, font_size=sp(13), bold=True,
+                                 color=CYAN, size_hint_y=None, height=dp(20)))
+            col.add_widget(Label(text=lbl, font_size=sp(10),
+                                 color=GREY, size_hint_y=None, height=dp(16)))
+            health_card.add_widget(col)
+        content.add_widget(health_card)
+
+        # Alarms title row
+        title_row = BoxLayout(size_hint_y=None, height=dp(32))
+        title_row.add_widget(Label(
+            text='ALARMS', font_size=sp(11), bold=True,
+            color=GREY, halign='left'))
+        self.alarm_count_lbl = Label(
+            text='', font_size=sp(11), color=CYAN, halign='right')
+        title_row.add_widget(self.alarm_count_lbl)
+        content.add_widget(title_row)
+
+        # Alarm list card
+        self.alarm_card = BoxLayout(
+            orientation='vertical', size_hint_y=None,
+            spacing=0)
+        self.alarm_card.bind(
+            minimum_height=self.alarm_card.setter('height'))
+        round_card(self.alarm_card, BG2, 18)
+        content.add_widget(self.alarm_card)
+
+        sv.add_widget(content)
+        root.add_widget(sv)
+        self.add_widget(root)
+        self._refresh_alarms()
+
+    def on_enter(self):
+        self._refresh_alarms()
+
+    def _tick(self, *_):
+        now = datetime.now()
+        self.dig_lbl.text  = now.strftime('%H:%M')
+        self.date_lbl.text = now.strftime('%A, %d %B')
+
+    def _refresh_alarms(self, *_):
+        self.alarm_card.clear_widgets()
+        active = sum(1 for a in alarms if a['active'])
+        total  = len(alarms)
+        self.alarm_count_lbl.text = f'{active}/{total} active'
+
+        if not alarms:
+            self.alarm_card.add_widget(Label(
+                text='No alarms — tap ＋ to add!',
+                font_size=sp(14), color=GREY,
+                size_hint_y=None, height=dp(60),
+                halign='center'))
+            return
+
+        for i, alarm in enumerate(alarms):
+            row = BoxLayout(size_hint_y=None, height=dp(68),
+                            padding=[dp(16),dp(10)])
+            left = BoxLayout(orientation='vertical')
+            tl = Label(text=alarm['time'], font_size=sp(26),
+                       bold=True,
+                       color=WHITE if alarm['active'] else GREY,
+                       halign='left', size_hint_y=None, height=dp(34))
+            tl.bind(size=lambda w,s: setattr(w,'text_size',s))
+            left.add_widget(tl)
+            sub = f"  {alarm['label']}  ·  " + (
+                ', '.join(alarm['days']) if alarm['days'] else 'Once')
+            sl = Label(text=sub, font_size=sp(11), color=GREY,
+                       halign='left', size_hint_y=None, height=dp(18))
+            sl.bind(size=lambda w,s: setattr(w,'text_size',s))
+            left.add_widget(sl)
+            row.add_widget(left)
+            sw = Switch(active=alarm['active'],
+                        size_hint=(None,None), size=(dp(56),dp(32)))
+            sw.bind(active=lambda w,val,idx=i: self._tog(idx,val))
+            row.add_widget(sw)
+            self.alarm_card.add_widget(row)
+            if i < len(alarms)-1:
+                sep_line(self.alarm_card)
+
+    def _tog(self, idx, val):
+        if 0 <= idx < len(alarms):
+            alarms[idx]['active'] = val
+
+# ══════════════════════════════════════════
+# AI SCREEN — Claude Routine Builder
+# ══════════════════════════════════════════
+class AIScreen(Screen):
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self._build()
+
+    def _build(self):
+        root = BoxLayout(orientation='vertical')
+        flat_bg(root, BG1)
+
+        # Nav
+        nav = BoxLayout(size_hint_y=None, height=dp(56),
+                        padding=[dp(8),dp(10)])
+        flat_bg(nav, BG1)
+        back = Button(text='← Back', font_size=sp(15),
+                      size_hint=(None,1), width=dp(90),
+                      background_color=(0,0,0,0), color=CYAN)
+        back.bind(on_press=lambda _: setattr(
+            self.manager,'current','home'))
+        nav.add_widget(back)
+        nav.add_widget(Label(text='🤖 AI Routine Builder',
+                             font_size=sp(17), bold=True, color=WHITE))
+        nav.add_widget(Widget(size_hint_x=None, width=dp(90)))
+        root.add_widget(nav)
+
+        sv = ScrollView()
+        content = BoxLayout(orientation='vertical',
+                            size_hint_y=None, spacing=dp(14),
+                            padding=[dp(12),dp(12)])
+        content.bind(minimum_height=content.setter('height'))
+
+        # Health summary card
+        h_card = BoxLayout(orientation='vertical',
+                           size_hint_y=None, height=dp(160),
+                           padding=[dp(16),dp(14)], spacing=dp(6))
+        round_card(h_card, BG2, 18)
+        h_card.add_widget(Label(
+            text='📊 Your Health Data', font_size=sp(15),
+            bold=True, color=CYAN, halign='left',
+            size_hint_y=None, height=dp(26)))
+
+        for icon, key, unit, col in [
+            ('🚶','steps','steps',GREEN),
+            ('❤️','heart_rate','bpm',CORAL),
+            ('😴','sleep','hrs',PURPLE),
+            ('🔥','calories','kcal',GOLD),
+        ]:
+            row = BoxLayout(size_hint_y=None, height=dp(24))
+            row.add_widget(Label(text=f'{icon}  {key.replace("_"," ").title()}',
+                                 font_size=sp(13), color=GREY, halign='left'))
+            row.add_widget(Label(
+                text=f"{health_data[key]} {unit}",
+                font_size=sp(13), bold=True, color=col, halign='right'))
+            h_card.add_widget(row)
+        content.add_widget(h_card)
+
+        # Generate button
+        self.gen_btn = Button(
+            text='🤖  Generate AI Routine',
+            font_size=sp(16), bold=True,
+            size_hint_y=None, height=dp(52),
+            background_color=PURPLE,
+            border=(dp(16),)*4
+        )
+        self.gen_btn.bind(on_press=self._generate)
+        content.add_widget(self.gen_btn)
+
+        # Status label
+        self.status_lbl = Label(
+            text='Tap to generate your personalized routine',
+            font_size=sp(13), color=GREY,
+            size_hint_y=None, height=dp(32),
+            halign='center')
+        content.add_widget(self.status_lbl)
+
+        # AI routine card
+        self.routine_card = BoxLayout(
+            orientation='vertical',
+            size_hint_y=None, spacing=0,
+            padding=[dp(16),dp(12)])
+        self.routine_card.bind(
+            minimum_height=self.routine_card.setter('height'))
+        round_card(self.routine_card, BG2, 18)
+        self.routine_card.add_widget(Label(
+            text='AI routine will appear here...',
+            font_size=sp(13), color=GREY,
+            size_hint_y=None, height=dp(40),
+            halign='center'))
+        content.add_widget(self.routine_card)
+
+        # Add to alarms button
+        self.add_btn = Button(
+            text='✅  Add AI Routine to Alarms',
+            font_size=sp(15), bold=True,
+            size_hint_y=None, height=dp(50),
+            background_color=GREEN,
+            border=(dp(16),)*4,
+            opacity=0
+        )
+        self.add_btn.bind(on_press=self._add_to_alarms)
+        content.add_widget(self.add_btn)
+
+        sv.add_widget(content)
+        root.add_widget(sv)
+        self.add_widget(root)
+
+    def _generate(self, *_):
+        self.gen_btn.text = '⏳  Asking Claude AI...'
+        self.gen_btn.background_color = GREY
+        self.status_lbl.text = 'Claude is analyzing your health data...'
+        claude_ai_routine(health_data, self._on_routine)
+
+    def _on_routine(self, routine, error):
+        if error:
+            self.status_lbl.text = f'API Error: {error}'
+            self.gen_btn.text = '🤖  Generate AI Routine'
+            self.gen_btn.background_color = PURPLE
+            # Demo routine when no API key
+            routine = [
+                {'time':'06:30','task':'Light exercise','reason':'Low sleep detected'},
+                {'time':'08:00','task':'Healthy breakfast','reason':'Boost energy'},
+                {'time':'09:00','task':'DSA Practice','reason':'Peak focus time'},
+                {'time':'13:00','task':'Lunch + 15min rest','reason':'Midday recharge'},
+                {'time':'19:00','task':'Java + Projects','reason':'Evening productivity'},
+                {'time':'22:00','task':'GitHub commit','reason':'Consistency streak'},
+            ]
+            self.status_lbl.text = '📋 Demo routine (add API key for AI)'
+
+        global ai_routine
+        ai_routine = routine
+        self.routine_card.clear_widgets()
+
+        self.routine_card.add_widget(Label(
+            text='🤖 AI Generated Routine',
+            font_size=sp(14), bold=True, color=CYAN,
+            halign='left', size_hint_y=None, height=dp(30)))
+        sep_line(self.routine_card)
+
+        for i, item in enumerate(routine):
+            row = BoxLayout(size_hint_y=None, height=dp(58),
+                            padding=[dp(4),dp(6)], spacing=dp(8))
+            # Time badge
+            time_lbl = Label(
+                text=item['time'], font_size=sp(15),
+                bold=True, color=CYAN,
+                size_hint=(None,1), width=dp(52))
+            row.add_widget(time_lbl)
+            # Task + reason
+            info = BoxLayout(orientation='vertical')
+            info.add_widget(Label(
+                text=item['task'], font_size=sp(14),
+                color=WHITE, halign='left',
+                size_hint_y=None, height=dp(22)))
+            info.add_widget(Label(
+                text=item.get('reason',''),
+                font_size=sp(11), color=GREY, halign='left',
+                size_hint_y=None, height=dp(18)))
+            row.add_widget(info)
+            self.routine_card.add_widget(row)
+            if i < len(routine)-1:
+                sep_line(self.routine_card)
+
+        self.gen_btn.text = '🔄  Regenerate'
+        self.gen_btn.background_color = PURPLE
+        self.add_btn.opacity = 1
+
+    def _add_to_alarms(self, *_):
+        for item in ai_routine:
+            add_alarm(item['time'], item['task'],
+                      ['Mon','Tue','Wed','Thu','Fri'],
+                      item.get('reason',''))
+        speak(f'Added {len(ai_routine)} AI alarms!')
+        self.status_lbl.text = f'✅ {len(ai_routine)} alarms added!'
+        self.manager.current = 'home'
+
+# ══════════════════════════════════════════
+# ADD ALARM SCREEN
+# ══════════════════════════════════════════
+class AddAlarmScreen(Screen):
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.sel_hour = 7
+        self.sel_min  = 0
+        self._build()
+
+    def _build(self):
+        root = BoxLayout(orientation='vertical', spacing=0)
+        flat_bg(root, BG1)
+
+        nav = BoxLayout(size_hint_y=None, height=dp(56),
+                        padding=[dp(8),dp(10)])
+        flat_bg(nav, BG1)
+        back = Button(text='Cancel', font_size=sp(15),
+                      size_hint=(None,1), width=dp(80),
+                      background_color=(0,0,0,0), color=CYAN)
+        back.bind(on_press=lambda _: setattr(
+            self.manager,'current','home'))
+        nav.add_widget(back)
+        nav.add_widget(Label(text='New Alarm', font_size=sp(17),
+                             bold=True, color=WHITE))
+        save = Button(text='Save', font_size=sp(15),
+                      size_hint=(None,1), width=dp(60),
+                      background_color=(0,0,0,0), color=CYAN)
+        save.bind(on_press=self._save)
+        nav.add_widget(save)
+        root.add_widget(nav)
+
+        sv = ScrollView()
+        content = BoxLayout(orientation='vertical',
+                            size_hint_y=None, spacing=dp(14),
+                            padding=[dp(12),dp(12)])
+        content.bind(minimum_height=content.setter('height'))
+
+        # Time picker card
+        picker = BoxLayout(orientation='vertical',
+                           size_hint_y=None, height=dp(180))
+        round_card(picker, BG2, 18)
+
+        # Up buttons
+        up = BoxLayout(size_hint_y=None, height=dp(44),
+                       padding=[dp(60),dp(4)])
+        for part in ['h','m']:
+            b = Button(text='▲', font_size=sp(22),
+                       background_color=(0,0,0,0), color=CYAN)
+            b.bind(on_press=lambda _,p=part: self._chg(p,1))
+            up.add_widget(b)
+            if part=='h':
+                up.add_widget(Widget(size_hint_x=None,width=dp(30)))
+        picker.add_widget(up)
+
+        t_row = BoxLayout(size_hint_y=None, height=dp(72),
+                          padding=[dp(40),0])
+        self.h_lbl = Label(text=f'{self.sel_hour:02d}',
+                           font_size=sp(52), bold=True, color=WHITE)
+        t_row.add_widget(self.h_lbl)
+        t_row.add_widget(Label(text=':', font_size=sp(52), bold=True,
+                               color=CYAN, size_hint_x=None, width=dp(24)))
+        self.m_lbl = Label(text=f'{self.sel_min:02d}',
+                           font_size=sp(52), bold=True, color=WHITE)
+        t_row.add_widget(self.m_lbl)
+        picker.add_widget(t_row)
+
+        dn = BoxLayout(size_hint_y=None, height=dp(44),
+                       padding=[dp(60),dp(4)])
+        for part in ['h','m']:
+            b = Button(text='▼', font_size=sp(22),
+                       background_color=(0,0,0,0), color=CYAN)
+            b.bind(on_press=lambda _,p=part: self._chg(p,-1))
+            dn.add_widget(b)
+            if part=='h':
+                dn.add_widget(Widget(size_hint_x=None,width=dp(30)))
+        picker.add_widget(dn)
+        content.add_widget(picker)
+
+        # Repeat / Sound
+        opts_card = BoxLayout(orientation='vertical',
+                              size_hint_y=None, height=dp(108),
+                              spacing=0)
+        round_card(opts_card, BG2, 18)
+        for i,(title,sub,dest) in enumerate([
+            ('Repeat','Mon – Fri','repeat'),
+            ('Sound','Default Alarm',None),
+        ]):
+            row = BoxLayout(size_hint_y=None, height=dp(52),
+                            padding=[dp(16),dp(10)])
+            info = BoxLayout(orientation='vertical')
+            info.add_widget(Label(text=title, font_size=sp(15),
+                                  color=WHITE, halign='left',
+                                  size_hint_y=None, height=dp(24)))
+            info.add_widget(Label(text=sub, font_size=sp(11),
+                                  color=GREY, halign='left',
+                                  size_hint_y=None, height=dp(16)))
+            row.add_widget(info)
+            row.add_widget(Label(text='›', font_size=sp(20),
+                                 color=GREY, size_hint=(None,1),
+                                 width=dp(24)))
+            if dest:
+                btn = Button(text='',pos=row.pos, size=row.size,
+                             background_color=(0,0,0,0))
+                btn.bind(on_press=lambda _,d=dest:
+                         setattr(self.manager,'current',d))
+                row.add_widget(btn)
+            opts_card.add_widget(row)
+            if i==0: sep_line(opts_card)
+        content.add_widget(opts_card)
+
+        sv.add_widget(content)
+        root.add_widget(sv)
+        self.add_widget(root)
+
+    def _chg(self, part, delta):
+        if part=='h':
+            self.sel_hour=(self.sel_hour+delta)%24
+            self.h_lbl.text=f'{self.sel_hour:02d}'
+        else:
+            self.sel_min=(self.sel_min+delta)%60
+            self.m_lbl.text=f'{self.sel_min:02d}'
+
+    def _save(self, *_):
+        t=f'{self.sel_hour:02d}:{self.sel_min:02d}'
+        add_alarm(t,f'Alarm {t}',['Mon','Wed','Thu'],'')
+        speak(f'Alarm set for {t}')
+        self.manager.current='home'
+
+# ══════════════════════════════════════════
+# REPEAT SCREEN
+# ══════════════════════════════════════════
+class RepeatScreen(Screen):
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.selected={'Monday','Tuesday','Wednesday','Thursday','Friday'}
+        self._build()
+
+    def _build(self):
+        root=BoxLayout(orientation='vertical')
+        flat_bg(root, BG1)
+        nav=BoxLayout(size_hint_y=None, height=dp(56),
+                      padding=[dp(8),dp(10)])
+        flat_bg(nav, BG1)
+        back=Button(text='← Back', font_size=sp(15),
+                    size_hint=(None,1), width=dp(90),
+                    background_color=(0,0,0,0), color=CYAN)
+        back.bind(on_press=lambda _: setattr(
+            self.manager,'current','add_alarm'))
+        nav.add_widget(back)
+        nav.add_widget(Label(text='Repeat', font_size=sp(17),
+                             bold=True, color=WHITE))
+        nav.add_widget(Widget(size_hint_x=None, width=dp(90)))
+        root.add_widget(nav)
+
+        days_card=BoxLayout(orientation='vertical',
+                            size_hint=(0.92,None), height=dp(392),
+                            spacing=0)
+        days_card.pos_hint={'center_x':0.5}
+        round_card(days_card, BG2, 18)
+        days=['Sunday','Monday','Tuesday','Wednesday',
+              'Thursday','Friday','Saturday']
+        for i,day in enumerate(days):
+            row=BoxLayout(size_hint_y=None, height=dp(54),
+                          padding=[dp(18),dp(10)])
+            dl=Label(text=day, font_size=sp(16),
+                     color=WHITE, halign='left')
+            dl.bind(size=lambda w,s: setattr(w,'text_size',s))
+            row.add_widget(dl)
+            check=Label(text='✓' if day in self.selected else '',
+                        font_size=sp(18), color=CYAN,
+                        size_hint=(None,1), width=dp(30))
+            row.add_widget(check)
+            btn=Button(text='', background_color=(0,0,0,0))
+            btn.bind(on_press=lambda w,dy=day,ch=check:
+                     self._tog(dy,ch))
+            row.add_widget(btn)
+            days_card.add_widget(row)
+            if i<len(days)-1: sep_line(days_card)
+
+        root.add_widget(Widget(size_hint_y=None, height=dp(16)))
+        root.add_widget(days_card)
+        root.add_widget(Widget())
+        self.add_widget(root)
+
+    def _tog(self, day, ch):
+        if day in self.selected:
+            self.selected.discard(day); ch.text=''
+        else:
+            self.selected.add(day); ch.text='✓'
+
+# ══════════════════════════════════════════
+# SETTINGS SCREEN
+# ══════════════════════════════════════════
+class SettingsScreen(Screen):
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self._build()
+
+    def _build(self):
+        root=BoxLayout(orientation='vertical')
+        flat_bg(root, BG1)
+        nav=BoxLayout(size_hint_y=None, height=dp(56),
+                      padding=[dp(8),dp(10)])
+        flat_bg(nav, BG1)
+        back=Button(text='← Back', font_size=sp(15),
+                    size_hint=(None,1), width=dp(90),
+                    background_color=(0,0,0,0), color=CYAN)
+        back.bind(on_press=lambda _: setattr(
+            self.manager,'current','home'))
+        nav.add_widget(back)
+        nav.add_widget(Label(text='Settings', font_size=sp(17),
+                             bold=True, color=WHITE))
+        nav.add_widget(Widget(size_hint_x=None, width=dp(90)))
+        root.add_widget(nav)
+
+        sv=ScrollView()
+        content=BoxLayout(orientation='vertical',
+                          size_hint_y=None, spacing=dp(16),
+                          padding=[dp(12),dp(14)])
+        content.bind(minimum_height=content.setter('height'))
+
+        # WearOS card
+        wos=BoxLayout(orientation='vertical',
+                      size_hint_y=None, height=dp(110),
+                      padding=[dp(16),dp(12)], spacing=dp(6))
+        round_card(wos, BG2, 16)
+        wos.add_widget(Label(text='⌚ WearOS', font_size=sp(15),
+                             bold=True, color=CYAN, halign='left',
+                             size_hint_y=None, height=dp(24)))
+        wos.add_widget(Label(
+            text='Connect your Pixel Watch or Galaxy Watch',
+            font_size=sp(12), color=GREY, halign='left',
+            size_hint_y=None, height=dp(18)))
+        con=Button(text='Connect Watch', font_size=sp(13),
+                   size_hint_y=None, height=dp(36),
+                   background_color=PURPLE,
+                   border=(dp(10),)*4)
+        wos.add_widget(con)
+        content.add_widget(wos)
+
+        # Volume
+        vol=BoxLayout(orientation='vertical',
+                      size_hint_y=None, height=dp(88),
+                      padding=[dp(16),dp(12)])
+        round_card(vol, BG2, 16)
+        vol.add_widget(Label(text='Volume', font_size=sp(15),
+                             color=WHITE, halign='left',
+                             size_hint_y=None, height=dp(26)))
+        vol.add_widget(Slider(min=0,max=100,value=70,
+                              size_hint_y=None, height=dp(34)))
+        content.add_widget(vol)
+
+        # API Key card
+        api=BoxLayout(orientation='vertical',
+                      size_hint_y=None, height=dp(90),
+                      padding=[dp(16),dp(12)], spacing=dp(4))
+        round_card(api, BG2, 16)
+        api.add_widget(Label(text='🤖 Claude API Key',
+                             font_size=sp(15), bold=True,
+                             color=CYAN, halign='left',
+                             size_hint_y=None, height=dp(24)))
+        api.add_widget(Label(
+            text=f"{'●●●●●●●' if CLAUDE_API_KEY!='YOUR_API_KEY_HERE' else '⚠️ Not set — AI features disabled'}",
+            font_size=sp(12),
+            color=GREEN if CLAUDE_API_KEY!='YOUR_API_KEY_HERE' else CORAL,
+            halign='left', size_hint_y=None, height=dp(20)))
+        api.add_widget(Label(
+            text='Edit VoxWatch_v3_complete.py → CLAUDE_API_KEY or set env var CLAUDE_API_KEY',
+            font_size=sp(11), color=GREY,
+            halign='left', size_hint_y=None, height=dp(18)))
+        content.add_widget(api)
+
+        # Info card
+        info=BoxLayout(orientation='vertical',
+                       size_hint_y=None, spacing=0)
+        round_card(info, BG2, 16)
+        for i,(title,val) in enumerate([
+            ('Developer','Aditya Thakare (Adiyani)'),
+            ('Brand','Adiyani'),
+            ('Version','VoxWatch v3.0'),
+            ('Tech Stack','Python · Kivy · Claude AI'),
+        ]):
+            row=BoxLayout(size_hint_y=None, height=dp(48),
+                          padding=[dp(16),dp(10)])
+            row.add_widget(Label(text=title, font_size=sp(14),
+                                 color=WHITE, halign='left'))
+            row.add_widget(Label(text=val, font_size=sp(12),
+                                 color=GREY, halign='right'))
+            info.add_widget(row)
+            if i<3: sep_line(info)
+        content.add_widget(info)
+
+        sv.add_widget(content)
+        root.add_widget(sv)
+        self.add_widget(root)
+
+# ══════════════════════════════════════════
+# ALARM TRIGGER SCREEN
+# ══════════════════════════════════════════
+class AlarmTriggerScreen(Screen):
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self._build()
+
+    def _build(self):
+        fl=FloatLayout()
+        flat_bg(fl, BG1)
+
+        # Glow circle bg
+        glow=Widget(size_hint=(None,None), size=(dp(280),dp(280)),
+                    pos_hint={'center_x':0.5,'center_y':0.65})
+        with glow.canvas:
+            Color(*with_alpha(PURPLE, 0.12))
+            g_el = Ellipse(pos=glow.pos, size=glow.size)
+        glow.bind(pos=lambda w,v: setattr(g_el,'pos',v),
+                  size=lambda w,v: setattr(g_el,'size',v))
+        fl.add_widget(glow)
+
+        self.time_lbl=Label(
+            text='07:00', font_size=sp(72), bold=True,
+            color=WHITE, size_hint=(1,None), height=dp(100),
+            pos_hint={'center_x':0.5,'center_y':0.62})
+        fl.add_widget(self.time_lbl)
+
+        self.name_lbl=Label(
+            text='Alarm', font_size=sp(20), color=CYAN,
+            size_hint=(1,None), height=dp(30),
+            pos_hint={'center_x':0.5,'center_y':0.52})
+        fl.add_widget(self.name_lbl)
+
+        # Routine card
+        self.rt_card=BoxLayout(
+            orientation='vertical',
+            size_hint=(0.88,None), height=dp(160),
+            pos_hint={'center_x':0.5,'center_y':0.33},
+            padding=[dp(16),dp(12)], spacing=dp(4))
+        round_card(self.rt_card, BG2, 18)
+        self.rt_lbl=Label(
+            text='', font_size=sp(13), color=SILVER,
+            halign='left', valign='top',
+            text_size=(dp(310),dp(130)))
+        self.rt_card.add_widget(self.rt_lbl)
+        fl.add_widget(self.rt_card)
+
+        # Stop button
+        stop=Button(
+            text='⏹  Stop Alarm', font_size=sp(18),
+            bold=True, size_hint=(0.82,None), height=dp(56),
+            pos_hint={'center_x':0.5,'y':0.05},
+            background_color=CORAL,
+            border=(dp(28),)*4)
+        stop.bind(on_press=lambda _: setattr(
+            self.manager,'current','home'))
+        fl.add_widget(stop)
+        self.add_widget(fl)
+
+    def show_alarm(self, alarm):
+        self.time_lbl.text=alarm['time']
+        self.name_lbl.text=alarm['label']
+        items=[i.strip() for i in
+               alarm.get('routine','').split('|') if i.strip()]
+        self.rt_lbl.text='\n'.join(
+            [f"  {i+1}.  {t}" for i,t in enumerate(items[:5])]
+        ) if items else 'No routine — stay focused!'
+        self.manager.current='trigger'
+        msg=f"It's {alarm['time']}. {alarm['label']}. "
+        if items:
+            msg+="Routine: "+", then ".join(items[:3])
+        speak(msg)
+
+# ══════════════════════════════════════════
+# ALARM CHECKER
+# ══════════════════════════════════════════
+class AlarmChecker:
+    def __init__(self, trigger):
+        self.ts=trigger
+    def start(self):
+        threading.Thread(target=self._loop,daemon=True).start()
+    def _loop(self):
+        while True:
+            now=datetime.now().strftime('%H:%M')
+            for a in alarms:
+                if a['active'] and not a['triggered'] and a['time']==now:
+                    a['triggered']=True
+                    Clock.schedule_once(
+                        lambda dt,al=a: self.ts.show_alarm(al),0)
+            time.sleep(10)
+            now2=datetime.now().strftime('%H:%M')
+            for a in alarms:
+                if a['triggered'] and a['time']!=now2:
+                    a['triggered']=False
+
+# ══════════════════════════════════════════
+# MAIN APP
+# ══════════════════════════════════════════
+class VoxWatchApp(App):
+    def build(self):
+        self.title='VoxWatch v3.0'
+        Window.clearcolor=(0.03,0.04,0.08,1)
+        sm=ScreenManager(transition=SlideTransition())
+        trigger=AlarmTriggerScreen(name='trigger')
+        sm.add_widget(HomeScreen(name='home'))
+        sm.add_widget(AIScreen(name='ai_screen'))
+        sm.add_widget(AddAlarmScreen(name='add_alarm'))
+        sm.add_widget(RepeatScreen(name='repeat'))
+        sm.add_widget(SettingsScreen(name='settings'))
+        sm.add_widget(trigger)
+        load_csv()
+        AlarmChecker(trigger).start()
+        speak('VoxWatch v3 ready hai!')
+        return sm
+
+if __name__=='__main__':
+    VoxWatchApp().run()
