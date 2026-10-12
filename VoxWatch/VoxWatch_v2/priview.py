@@ -1,13 +1,4 @@
-"""
-WakeUp Alarm — polished Kivy single-file UI
-===========================================
 
-Install:
-    pip install kivy
-
-Run:
-    python wakeup_alarm_ui.py
-"""
 
 import json
 import math
