@@ -1,9 +1,7 @@
-# pyright: reportMissingImports=false
-#
-# ╔══════════════════════════════════════════════════════════╗
-# ║  VoxWatch v3.0 — Production Ready (ALL FIXES APPLIED)   ║
-# ║  Banaya: Aditya Thakare (Adiyani) · MGAHV Wardha        ║
-# ╚══════════════════════════════════════════════════════════╝
+
+#  VoxWatch v3.0 — Production Ready (ALL FIXES APPLIED)   
+#  Banaya: Aditya Thakare (Adiyani) · MGAHV Wardha        
+
 #
 # ✅ FIX 1: sleep(5) — alarm miss nahi hoga
 # ✅ FIX 2: abspath(__file__) — Android crash fix
@@ -95,7 +93,7 @@ def _init_tts():
         _tts = None
         TTS_OK = False
 
-# Do not initialize pyttsx3 on the UI thread; Windows can freeze here.
+
 threading.Thread(target=_init_tts, daemon=True).start()
 
 def set_volume(val):
@@ -295,9 +293,9 @@ def load_csv():
     except Exception as e:
         print(f"CSV: {e}")
 
-# ══════════════════════════════════════════
+
 # FIX 8+9: DEVICE MANAGER (Watch + Buds)
-# ══════════════════════════════════════════
+
 class DevMgr:
     watch_ok   = False
     watch_name = 'Not connected'
@@ -391,9 +389,9 @@ class DevMgr:
 
 threading.Thread(target=DevMgr.scan, daemon=True).start()
 
-# ══════════════════════════════════════════
+
 # CLAUDE AI
-# ══════════════════════════════════════════
+
 def claude_routine(health, cb):
     def _call():
         prompt = f"""You are VoxWatch AI for an MCA student targeting Google/Microsoft.
